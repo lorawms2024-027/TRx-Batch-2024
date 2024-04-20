@@ -1,0 +1,25 @@
+var recentDataSheetId = "1Zj7F0XxYCvdvPhtX2Qrz7caIIQdzQta3JPKh-KK044Q"; 
+var dateTimeFormat = "yyyy-MM-dd HH:mm:ss"; // Date and time format
+
+function doPost(e) {
+  var sheet = SpreadsheetApp.openById("1Zj7F0XxYCvdvPhtX2Qrz7caIIQdzQta3JPKh-KK044Q").getActiveSheet();
+  var data = JSON.parse(e.postData.contents);
+  
+  // Extract data from JSON
+  var rssi = data.rssi;
+  var snr = data.snr;
+  var pdr = data.pdr;
+  var packetData = data.packet_data; // Adding packet data
+  
+  // Append data to the main data sheet
+  sheet.appendRow([rssi, snr, pdr, packetData, new Date()]);
+  
+  // Update recent data
+  var recentDataSheet = SpreadsheetApp.openById(recentDataSheetId).getActiveSheet();
+  var recentDataRange = recentDataSheet.getRange("G1:K1");
+  var recentData = [rssi, snr, pdr, packetData, Utilities.formatDate(new Date(), Session.getScriptTimeZone(), dateTimeFormat)];
+  recentDataRange.setValues([recentData]);
+  
+  // Return a response
+  return ContentService.createTextOutput("Data received and appended to sheet.");
+}
