@@ -1,0 +1,209 @@
+include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <LoRa.h>
+#include <LowPower.h> // Include the LowPower library
+
+// Define constants for sleep duration and hour interval
+const unsigned long SLEEP_DURATION = 3600000; // 1 hour in milliseconds
+const int HOURS_INTERVAL = 1; // Send data every hour
+
+#define ss 5
+#define rst 14
+#define dio0 2
+#define BAND 433E6  
+
+Adafruit_BME280 bme; // Create BME280 object
+
+const int hallSensorPin_rain = 27; // Hall sensor pin for rain gauge
+const int hallSensorPin_wind = 4; // Hall sensor pin for wind speed sensor
+const float bucketRadius = 136;  // Diameter of the funnel in millimeters
+const float volumePerTilt = 0.241;  // Volume of one tilt of the tipping bucket in millimeters
+const float magnetRadius = 2; // Radius of the magnet in the wind speed sensor
+const unsigned int rotations = 2; // Number of rotations to calculate wind speed
+const unsigned int magnetTriggers = 100; // Number of triggers for one rotation of the wind speed sensor
+
+volatile unsigned int sensorCount_rain = 0;
+volatile unsigned int sensorCount_wind = 0;
+unsigned long prevTime = 0;
+
+// Global variables to store LoRa parameters
+float frequency;
+int spreadingFactor;
+float signalBandwidth;
+
+int readingID = 0;
+
+String LoRaMessage; // Message to send
+
+// Arrays for wind direction detection
+const int sensorPins[8] = {35, 32, 33, 15, 25, 26, 12, 13};
+const int numSensors = 8;
+const char* directions[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+
+// Function to generate a random number within a range
+int generateRandomNumber(int minVal, int maxVal)
+{
+  return random(minVal, maxVal + 1);
+}
+
+void startLoRA()
+{
+  LoRa.setPins(ss, rst, dio0); // Setup LoRa transceiver module
+
+  int counter = 0;
+  while (!LoRa.begin(BAND) && counter < 10)
+  {
+    Serial.print(".");
+    counter++;
+    delay(500);
+  }
+  if (counter == 10)
+  {
+    Serial.println("Starting LoRa failed!");
+  }
+  Serial.println("LoRa Initialization OK!");
+
+  // Set spreading factor and bandwidth
+  LoRa.setSpreadingFactor(7); // Set spreading factor (7-12)
+  LoRa.setSignalBandwidth(125E3); // Set bandwidth (125E3, 250E3, 500E3)
+
+  // Store LoRa parameters in global variables
+  frequency = BAND;
+  spreadingFactor = 7; // Change this based on the spreading factor setting
+  signalBandwidth = 125E3; // Change this based on the bandwidth setting
+
+  delay(2000);
+}
+
+void IRAM_ATTR handleInterrupt_rain()
+{
+  sensorCount_rain++;
+}
+
+void IRAM_ATTR handleInterrupt_wind()
+{
+  sensorCount_wind++;
+}
+
+void sendReadings()
+{
+  unsigned long currentTime = millis();
+  unsigned long elapsedTime = currentTime - prevTime;
+  
+  float precipitation = 0; // Declare precipitation variable here
+  float wind_speed = 0; // Declare wind speed variable here
+
+  if (elapsedTime >= 1000)
+  {
+    detachInterrupt(digitalPinToInterrupt(hallSensorPin_rain));
+    precipitation = (sensorCount_rain * volumePerTilt);      sensorCount_rain = 0;
+
+    detachInterrupt(digitalPinToInterrupt(hallSensorPin_wind));
+    float rotationsPerSecond = sensorCount_wind / (elapsedTime / 1000.0);
+    wind_speed = (rotationsPerSecond * (2 * PI * magnetRadius)) / magnetTriggers;
+    sensorCount_wind = 0;
+
+    prevTime = currentTime;
+
+    attachInterrupt(digitalPinToInterrupt(hallSensorPin_rain), handleInterrupt_rain, FALLING);
+    attachInterrupt(digitalPinToInterrupt(hallSensorPin_wind), handleInterrupt_wind, FALLING);
+  }
+  float precipitation_in_inches = precipitation;
+
+  int randomNumber = generateRandomNumber(0, 100);
+  float temperature = bme.readTemperature();
+  float pressure = bme.readPressure() / 100.0F; // Convert pressure to hPa
+  float humidity = bme.readHumidity();
+
+  // Read the state of all IR sensors for wind direction
+  int sensorReadings[8];
+  bool anySensorConnected = false; // Flag to check if any sensor is connected
+  for (int i = 0; i < 8; i++) {
+    sensorReadings[i] = digitalRead(sensorPins[i]);
+    if (sensorReadings[i] == HIGH) { // Check if any sensor is connected
+      anySensorConnected = true;
+      break;  
+    }
+  }
+
+  // Find the direction with the highest reading if any sensor is connected
+  int maxReading = 0;
+  int maxIndex = -1;
+  if (anySensorConnected) { // Proceed only if any sensor is connected
+    for (int i = 0; i < 8; i++) {
+      if (sensorReadings[i] > maxReading) {
+        maxReading = sensorReadings[i];
+        maxIndex = i;
+      }
+    }
+  }
+
+  // Construct wind direction string
+  String wind_direction;
+  if (maxIndex != -1) {
+    wind_direction = directions[maxIndex];
+  } else {
+    wind_direction = "error"; // Set wind direction to "error" when no sensor is connected
+  }
+
+  // Construct LoRa message
+  LoRaMessage = "ID:" + String(randomNumber) + " " + String(temperature) + "," + String(pressure) + "," + String(humidity) + "," + String(precipitation) + "," + String(wind_speed) + "," + wind_direction;
+
+  // Send LoRa message
+  LoRa.beginPacket();
+  LoRa.print(LoRaMessage);
+  LoRa.endPacket();
+
+  // Print to serial monitor for debugging
+  Serial.print("Sending packet: ");
+  Serial.println(readingID);
+  readingID++;
+  Serial.println(LoRaMessage);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(hallSensorPin_rain, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(hallSensorPin_rain), handleInterrupt_rain, FALLING);
+
+  pinMode(hallSensorPin_wind, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(hallSensorPin_wind), handleInterrupt_wind, FALLING);
+
+  bool status;
+
+  status = bme.begin(0x76);  
+  if (!status) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+  
+  startLoRA();
+}
+
+void loop()
+{
+  sendReadings(); // Send sensor readings
+  
+  // Increment loop counter
+  loopCounter++;
+
+  // If one hour has passed, reset the counter and sleep
+  if (loopCounter >= HOURS_INTERVAL) {
+    // Reset the counter
+    loopCounter = 0;
+    
+    // Enter sleep mode for 1 hour
+    LowPower.sleep(SLEEP_DURATION); // Sleep for 1 hour
+  } else {
+    // If not yet time to send data, enter sleep mode for a shorter duration
+    LowPower.sleep(30000); // Sleep for 30 seconds
+  }
+}
+
+
+
+
+
